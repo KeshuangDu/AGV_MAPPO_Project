@@ -13,7 +13,7 @@ class TrainConfig:
     """中等训练配置类"""
 
     # ===== 基础训练参数（中等规模）=====
-    NUM_EPISODES = 1000  # 训练1000轮（从100增加）
+    NUM_EPISODES = 100  # 训练1000轮（从100增加）
     MAX_STEPS_PER_EPISODE = 1000  # 每轮最大1000步
 
     BATCH_SIZE = 256  # 批次大小

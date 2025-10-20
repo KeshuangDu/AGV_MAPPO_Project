@@ -16,6 +16,8 @@ import json
 from datetime import datetime
 import pickle
 
+import config.train_config_medium
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config.env_config import env_config
@@ -253,7 +255,7 @@ class Trainer:
     def train(self):
         """主训练循环"""
         print("\n" + "="*60)
-        print("🚀 MAPPO训练 - 中等规模 (1000轮)")
+        print(f"🚀 MAPPO训练 - 中等规模 ({config.train_config_medium.TrainConfig.NUM_EPISODES})")
         print("="*60)
         print(f"环境: 水平布局港口 + 双向路由")
         print(f"AGV数量: {self.num_agents}")
@@ -346,7 +348,7 @@ class Trainer:
         # 保存最终模型
         final_model_path = os.path.join(
             train_config.CHECKPOINT_DIR,
-            "mappo_final_1000ep.pt"
+            f"mappo_final_{config.train_config_medium.TrainConfig.NUM_EPISODES}ep.pt"
         )
         self.mappo.save(final_model_path)
 
