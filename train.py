@@ -1,6 +1,22 @@
 """
-训练主程序
-执行MAPPO训练循环
+AGV MAPPO 训练主程序
+支持多种训练模式：quick(100轮)/medium(1000轮)/standard(5000轮)
+
+使用方法：
+    # 快速测试
+    python train.py --mode quick
+
+    # 中等规模训练
+    python train.py --mode medium
+
+    # 完整训练
+    python train.py --mode standard
+
+    # 自定义轮数
+    python train.py --episodes 500
+
+    # 从检查点恢复
+    python train.py --mode medium --resume ./data/checkpoints/mappo_episode_500.pt
 """
 
 import os
@@ -12,6 +28,7 @@ from tqdm import tqdm
 import json
 from datetime import datetime
 import pickle
+import argparse
 
 # 添加项目路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -27,17 +44,32 @@ from algorithm.mappo import MAPPO
 class Trainer:
     """训练器类"""
 
-    def __init__(self):
-        """初始化训练器"""
+    def __init__(self, mode='standard', custom_episodes=None, resume_path=None):
+        """
+        初始化训练器
+
+        Args:
+            mode: 训练模式 ('quick', 'medium', 'standard')
+            custom_episodes: 自定义训练轮数
+            resume_path: 恢复训练的检查点路径
+        """
+        self.mode = mode
+        self.resume_path = resume_path
+
+        # 根据模式调整配置
+        self.config = self._get_config(mode, custom_episodes)
+
         # 设置随机种子
-        self.set_seed(train_config.SEED)
+        self.set_seed(self.config['seed'])
 
         # 设置设备
         self.device = torch.device(
-            'cuda' if torch.cuda.is_available() and train_config.USE_CUDA
+            'cuda' if torch.cuda.is_available() and self.config['use_cuda']
             else 'cpu'
         )
-        print(f"Using device: {self.device}")
+        print(f"🖥️  Using device: {self.device}")
+        print(f"🎯 Training mode: {mode}")
+        print(f"📊 Total episodes: {self.config['num_episodes']}")
 
         # 创建目录
         self.create_directories()
@@ -63,413 +95,277 @@ class Trainer:
         self.mappo = MAPPO(
             actor_critic=self.actor_critic,
             num_agents=self.num_agents,
-            lr_actor=train_config.ACTOR_LR,
-            lr_critic=train_config.CRITIC_LR,
-            gamma=train_config.GAMMA,
-            gae_lambda=train_config.GAE_LAMBDA,
-            clip_epsilon=train_config.CLIP_EPSILON,
-            value_loss_coef=train_config.VALUE_LOSS_COEF,
-            entropy_coef=train_config.ENTROPY_COEF,
-            max_grad_norm=train_config.MAX_GRAD_NORM,
-            ppo_epochs=train_config.PPO_EPOCHS,
+            lr_actor=self.config['actor_lr'],
+            lr_critic=self.config['critic_lr'],
+            gamma=self.config['gamma'],
+            gae_lambda=self.config['gae_lambda'],
+            clip_epsilon=self.config['clip_epsilon'],
+            value_loss_coef=self.config['value_loss_coef'],
+            entropy_coef=self.config['entropy_coef'],
+            max_grad_norm=self.config['max_grad_norm'],
+            ppo_epochs=self.config['ppo_epochs'],
             device=self.device
         )
 
         # TensorBoard
-        if train_config.USE_TENSORBOARD:
+        if self.config['use_tensorboard']:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_dir = os.path.join(train_config.TB_LOG_DIR, f"run_{timestamp}")
-            self.writer = SummaryWriter(log_dir)
-            print(f"TensorBoard logs will be saved to: {log_dir}")
+            log_dir = os.path.join(self.config['log_dir'], f"{mode}_{timestamp}")
+            self.writer = SummaryWriter(log_dir=log_dir)
+            print(f"📈 TensorBoard logging to: {log_dir}")
         else:
             self.writer = None
 
         # 训练统计
-        self.total_steps = 0
         self.episode_rewards = []
-        self.training_data = []  # 存储随机生成的训练数据
+        self.episode_lengths = []
+        self.tasks_completed = []
 
-    def set_seed(self, seed: int):
+        # 恢复训练
+        self.start_episode = 0
+        if self.resume_path:
+            self.load_checkpoint(self.resume_path)
+
+    def _get_config(self, mode, custom_episodes):
+        """根据模式获取配置"""
+        config = {
+            'seed': train_config.SEED,
+            'use_cuda': train_config.USE_CUDA,
+            'actor_lr': train_config.ACTOR_LR,
+            'critic_lr': train_config.CRITIC_LR,
+            'gamma': train_config.GAMMA,
+            'gae_lambda': train_config.GAE_LAMBDA,
+            'clip_epsilon': train_config.CLIP_EPSILON,
+            'value_loss_coef': train_config.VALUE_LOSS_COEF,
+            'entropy_coef': train_config.ENTROPY_COEF,
+            'max_grad_norm': train_config.MAX_GRAD_NORM,
+            'ppo_epochs': train_config.PPO_EPOCHS,
+            'use_tensorboard': train_config.USE_TENSORBOARD,
+        }
+
+        # 根据模式设置参数
+        if mode == 'quick':
+            config.update({
+                'num_episodes': 100,
+                'save_interval': 20,
+                'log_dir': './runs/quick',
+                'checkpoint_dir': './data/checkpoints_quick'
+            })
+        elif mode == 'medium':
+            config.update({
+                'num_episodes': 1000,
+                'save_interval': 100,
+                'log_dir': './runs/medium',
+                'checkpoint_dir': './data/checkpoints_medium'
+            })
+        else:  # standard
+            config.update({
+                'num_episodes': 5000,
+                'save_interval': 500,
+                'log_dir': './runs/standard',
+                'checkpoint_dir': './data/checkpoints'
+            })
+
+        # 自定义轮数覆盖
+        if custom_episodes:
+            config['num_episodes'] = custom_episodes
+
+        return config
+
+    def set_seed(self, seed):
         """设置随机种子"""
         torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
 
     def create_directories(self):
         """创建必要的目录"""
-        os.makedirs(train_config.CHECKPOINT_DIR, exist_ok=True)
-        os.makedirs(train_config.LOG_DIR, exist_ok=True)
-        os.makedirs(train_config.DATA_DIR, exist_ok=True)
-        os.makedirs(train_config.TB_LOG_DIR, exist_ok=True)
+        os.makedirs(self.config['checkpoint_dir'], exist_ok=True)
+        os.makedirs(self.config['log_dir'], exist_ok=True)
+        os.makedirs('./data/logs', exist_ok=True)
 
-    def calculate_obs_dim(self) -> int:
-        """计算观察维度"""
-        # own_state: 7 + nearby_agvs: 5*4 + task_info: 6 + path_occupancy: 3
-        obs_dim = 7 + 5*4 + 6 + env_config.NUM_HORIZONTAL_LANES
-        return obs_dim
-
-    def flatten_observation(self, obs_dict: dict) -> np.ndarray:
-        """
-        将字典观察展平为向量
-
-        Args:
-            obs_dict: 观察字典
-
-        Returns:
-            展平的观察向量
-        """
-        obs_list = []
-        obs_list.append(obs_dict['own_state'])
-        obs_list.append(obs_dict['nearby_agvs'].flatten())
-        obs_list.append(obs_dict['task_info'])
-        obs_list.append(obs_dict['path_occupancy'])
-
-        return np.concatenate(obs_list, axis=0)
-
-    def collect_rollout(self) -> dict:
-        """
-        收集一个episode的经验
-
-        Returns:
-            经验缓冲区字典
-        """
-        # 初始化缓冲区
-        observations = []
-        actions = {'lane': [], 'direction': [], 'motion': []}
-        log_probs = []
-        rewards = []
-        values = []
-        dones = []
-
-        # 重置环境
-        obs_dict, info = self.env.reset()
-
-        # 保存初始环境状态(用于后续分析)
-        episode_data = {
-            'initial_state': {
-                'agv_positions': [agv.position.tolist() for agv in self.env.agvs],
-                'tasks': [task.get_info() for task in self.env.tasks]
-            },
-            'transitions': []
-        }
-
-        episode_reward = 0
-
-        for step in range(train_config.MAX_STEPS_PER_EPISODE):
-            # 收集所有智能体的观察
-            obs_batch = []
-            for i in range(self.num_agents):
-                obs = self.flatten_observation(obs_dict[f'agent_{i}'])
-                obs_batch.append(obs)
-
-            obs_tensor = torch.FloatTensor(np.array(obs_batch)).to(self.device)
-
-            # 选择动作
-            actions_tensor, log_probs_tensor, values_tensor = self.mappo.select_action(
-                obs_tensor
-            )
-
-            # 转换为环境格式
-            env_actions = {}
-            for i in range(self.num_agents):
-                env_actions[f'agent_{i}'] = {
-                    'lane': actions_tensor['lane'][i].cpu().item(),
-                    'direction': actions_tensor['direction'][i].cpu().item(),
-                    'motion': actions_tensor['motion'][i].cpu().numpy()
-                }
-
-            # 环境步进
-            next_obs_dict, reward_dict, terminated_dict, truncated_dict, info_dict = self.env.step(env_actions)
-
-            # 收集奖励
-            reward_batch = np.array([
-                reward_dict[f'agent_{i}'] for i in range(self.num_agents)
-            ])
-
-            # 检查是否结束
-            done = terminated_dict['__all__'] or truncated_dict['__all__']
-            done_batch = np.array([done] * self.num_agents)
-
-            # 存储经验
-            observations.append(obs_tensor.cpu())
-            actions['lane'].append(actions_tensor['lane'].cpu())
-            actions['direction'].append(actions_tensor['direction'].cpu())
-            actions['motion'].append(actions_tensor['motion'].cpu())
-            log_probs.append(log_probs_tensor.cpu())
-            rewards.append(torch.FloatTensor(reward_batch))
-            values.append(values_tensor.cpu())
-            dones.append(torch.FloatTensor(done_batch))
-
-            # 保存转换数据
-            episode_data['transitions'].append({
-                'step': step,
-                'observations': obs_batch,
-                'actions': {k: v.cpu().numpy().tolist() for k, v in actions_tensor.items()},
-                'rewards': reward_batch.tolist(),
-                'info': info_dict.get('agent_0', {})
-            })
-
-            episode_reward += reward_batch.mean()
-
-            obs_dict = next_obs_dict
-
-            if done:
-                break
-
-        # 计算最后的value
-        next_obs_batch = []
-        for i in range(self.num_agents):
-            obs = self.flatten_observation(obs_dict[f'agent_{i}'])
-            next_obs_batch.append(obs)
-        next_obs_tensor = torch.FloatTensor(np.array(next_obs_batch)).to(self.device)
-
-        with torch.no_grad():
-            next_values = self.mappo.actor_critic.get_value(next_obs_tensor).cpu()
-
-        # 转换为tensor
-        observations = torch.stack(observations)  # [num_steps, num_agents, obs_dim]
-        log_probs = torch.stack(log_probs)  # [num_steps, num_agents]
-        rewards = torch.stack(rewards)  # [num_steps, num_agents]
-        values = torch.stack(values).squeeze(-1)  # [num_steps, num_agents]
-        dones = torch.stack(dones)  # [num_steps, num_agents]
-
-        # 计算GAE
-        advantages, returns = self.mappo.compute_gae(
-            rewards, values, dones, next_values.squeeze(-1)
-        )
-
-        # 构建rollout buffer
-        rollout_buffer = {
-            'observations': observations.reshape(-1, self.obs_dim),
-            'actions': {
-                'lane': torch.stack(actions['lane']).reshape(-1),
-                'direction': torch.stack(actions['direction']).reshape(-1),
-                'motion': torch.stack(actions['motion']).reshape(-1, 2)
-            },
-            'log_probs': log_probs.reshape(-1),
-            'advantages': advantages.reshape(-1),
-            'returns': returns.reshape(-1)
-        }
-
-        # 保存episode数据
-        episode_data['episode_reward'] = episode_reward
-        episode_data['episode_length'] = step + 1
-        self.training_data.append(episode_data)
-
-        return rollout_buffer, episode_reward
+    def calculate_obs_dim(self):
+        """计算观察空间维度"""
+        return 7 + 5 * 4 + 6 + env_config.NUM_HORIZONTAL_LANES
 
     def train(self):
-        """主训练循环"""
-        print("\n" + "="*50)
-        print("Starting MAPPO Training")
-        print("="*50)
-        print(f"Environment: Water Horizontal Layout Port")
-        print(f"Number of AGVs: {self.num_agents}")
-        print(f"Bidirectional Routing: Enabled")
-        print(f"Total Episodes: {train_config.NUM_EPISODES}")
-        print("="*50 + "\n")
+        """训练主循环"""
+        print("\n" + "="*60)
+        print("🚀 Starting Training...")
+        print("="*60 + "\n")
 
-        for episode in tqdm(range(train_config.NUM_EPISODES), desc="Training"):
-            # 收集经验
-            rollout_buffer, episode_reward = self.collect_rollout()
+        for episode in range(self.start_episode, self.config['num_episodes']):
+            obs, info = self.env.reset()
+            episode_reward = {f'agent_{i}': 0 for i in range(self.num_agents)}
+            episode_length = 0
+            done = False
+
+            # 收集轨迹
+            trajectories = {f'agent_{i}': {
+                'obs': [], 'actions': [], 'rewards': [],
+                'values': [], 'log_probs': [], 'dones': []
+            } for i in range(self.num_agents)}
+
+            # Episode循环
+            with tqdm(total=env_config.MAX_EPISODE_STEPS,
+                     desc=f"Episode {episode+1}/{self.config['num_episodes']}",
+                     leave=False) as pbar:
+
+                while not done and episode_length < env_config.MAX_EPISODE_STEPS:
+                    # 选择动作
+                    actions = {}
+                    for agent_id in range(self.num_agents):
+                        agent_name = f'agent_{agent_id}'
+                        obs_tensor = self._process_obs(obs[agent_name])
+
+                        with torch.no_grad():
+                            action, value, log_prob = self.mappo.select_action(obs_tensor)
+
+                        actions[agent_name] = action
+
+                        # 记录轨迹
+                        trajectories[agent_name]['obs'].append(obs[agent_name])
+                        trajectories[agent_name]['actions'].append(action)
+                        trajectories[agent_name]['values'].append(value)
+                        trajectories[agent_name]['log_probs'].append(log_prob)
+
+                    # 环境步进
+                    next_obs, rewards, terminated, truncated, info = self.env.step(actions)
+                    done = terminated or truncated
+
+                    # 记录奖励和done
+                    for agent_id in range(self.num_agents):
+                        agent_name = f'agent_{agent_id}'
+                        trajectories[agent_name]['rewards'].append(rewards[agent_name])
+                        trajectories[agent_name]['dones'].append(done)
+                        episode_reward[agent_name] += rewards[agent_name]
+
+                    obs = next_obs
+                    episode_length += 1
+                    pbar.update(1)
 
             # 更新策略
-            metrics = self.mappo.update(rollout_buffer)
+            losses = self.mappo.update(trajectories)
 
-            # 记录奖励
-            self.episode_rewards.append(episode_reward)
+            # 记录统计
+            avg_reward = np.mean([episode_reward[f'agent_{i}']
+                                 for i in range(self.num_agents)])
+            self.episode_rewards.append(avg_reward)
+            self.episode_lengths.append(episode_length)
 
-            # 日志记录
-            if (episode + 1) % train_config.LOG_INTERVAL == 0:
-                avg_reward = np.mean(self.episode_rewards[-train_config.LOG_INTERVAL:])
+            tasks_done = len(self.env.completed_tasks)
+            self.tasks_completed.append(tasks_done)
 
-                print(f"\nEpisode {episode + 1}/{train_config.NUM_EPISODES}")
-                print(f"  Average Reward: {avg_reward:.2f}")
-                print(f"  Actor Loss: {metrics['actor_loss']:.4f}")
-                print(f"  Value Loss: {metrics['value_loss']:.4f}")
-                print(f"  Entropy: {metrics['entropy']:.4f}")
+            # 打印信息
+            if (episode + 1) % 10 == 0:
+                print(f"\n📊 Episode {episode+1}")
+                print(f"   Reward: {avg_reward:.2f}")
+                print(f"   Length: {episode_length}")
+                print(f"   Tasks: {tasks_done}")
+                print(f"   Actor Loss: {losses['actor_loss']:.4f}")
+                print(f"   Critic Loss: {losses['critic_loss']:.4f}")
 
-                # TensorBoard
-                if self.writer:
-                    self.writer.add_scalar('Train/EpisodeReward', episode_reward, episode)
-                    self.writer.add_scalar('Train/AvgReward', avg_reward, episode)
-                    self.writer.add_scalar('Train/ActorLoss', metrics['actor_loss'], episode)
-                    self.writer.add_scalar('Train/ValueLoss', metrics['value_loss'], episode)
-                    self.writer.add_scalar('Train/Entropy', metrics['entropy'], episode)
+            # TensorBoard记录
+            if self.writer:
+                self.writer.add_scalar('Train/EpisodeReward', avg_reward, episode)
+                self.writer.add_scalar('Train/EpisodeLength', episode_length, episode)
+                self.writer.add_scalar('Train/TasksCompleted', tasks_done, episode)
+                self.writer.add_scalar('Train/ActorLoss', losses['actor_loss'], episode)
+                self.writer.add_scalar('Train/CriticLoss', losses['critic_loss'], episode)
+                self.writer.add_scalar('Train/Entropy', losses['entropy'], episode)
 
             # 保存检查点
-            if (episode + 1) % train_config.SAVE_INTERVAL == 0:
-                checkpoint_path = os.path.join(
-                    train_config.CHECKPOINT_DIR,
-                    f"mappo_episode_{episode + 1}.pt"
-                )
-                self.mappo.save(checkpoint_path)
-
-                # 保存训练数据
-                data_path = os.path.join(
-                    train_config.DATA_DIR,
-                    f"training_data_episode_{episode + 1}.pkl"
-                )
-                with open(data_path, 'wb') as f:
-                    pickle.dump(self.training_data[-train_config.SAVE_INTERVAL:], f)
-                print(f"Training data saved to {data_path}")
-
-            # 评估
-            if (episode + 1) % train_config.EVAL_INTERVAL == 0:
-                eval_reward = self.evaluate()
-                print(f"  Evaluation Reward: {eval_reward:.2f}")
-
-                if self.writer:
-                    self.writer.add_scalar('Eval/Reward', eval_reward, episode)
-
-        # 训练结束
-        print("\n" + "="*50)
-        print("Training Completed!")
-        print("="*50)
+            if (episode + 1) % self.config['save_interval'] == 0:
+                self.save_checkpoint(episode + 1)
 
         # 保存最终模型
-        final_model_path = os.path.join(
-            train_config.CHECKPOINT_DIR,
-            "500mappo_final.pt"
-        )
-        self.mappo.save(final_model_path)
+        self.save_checkpoint(self.config['num_episodes'], final=True)
 
-        # 保存所有训练数据
-        all_data_path = os.path.join(
-            train_config.DATA_DIR,
-            "all_training_data.pkl"
-        )
-        with open(all_data_path, 'wb') as f:
-            pickle.dump(self.training_data, f)
-        print(f"All training data saved to {all_data_path}")
-
-        # 保存训练曲线
-        self.save_training_curves()
+        print("\n" + "="*60)
+        print("✅ Training Completed!")
+        print("="*60)
 
         if self.writer:
             self.writer.close()
 
-    def evaluate(self, num_episodes: int = None) -> float:
-        """
-        评估策略
+    def _process_obs(self, obs):
+        """处理观察值"""
+        obs_array = np.concatenate([
+            obs['own_state'],
+            obs['nearby_agvs'].flatten(),
+            obs['task_info'],
+            obs['path_occupancy']
+        ])
+        return torch.FloatTensor(obs_array).unsqueeze(0).to(self.device)
 
-        Args:
-            num_episodes: 评估轮数
-
-        Returns:
-            平均奖励
-        """
-        if num_episodes is None:
-            num_episodes = train_config.NUM_EVAL_EPISODES
-
-        eval_rewards = []
-
-        for _ in range(num_episodes):
-            obs_dict, _ = self.env.reset()
-            episode_reward = 0
-            done = False
-
-            while not done:
-                # 收集观察
-                obs_batch = []
-                for i in range(self.num_agents):
-                    obs = self.flatten_observation(obs_dict[f'agent_{i}'])
-                    obs_batch.append(obs)
-
-                obs_tensor = torch.FloatTensor(np.array(obs_batch)).to(self.device)
-
-                # 选择动作(确定性)
-                actions_tensor, _, _ = self.mappo.select_action(
-                    obs_tensor, deterministic=True
-                )
-
-                # 转换为环境格式
-                env_actions = {}
-                for i in range(self.num_agents):
-                    env_actions[f'agent_{i}'] = {
-                        'lane': actions_tensor['lane'][i].cpu().item(),
-                        'direction': actions_tensor['direction'][i].cpu().item(),
-                        'motion': actions_tensor['motion'][i].cpu().numpy()
-                    }
-
-                # 步进
-                obs_dict, reward_dict, terminated_dict, truncated_dict, _ = self.env.step(env_actions)
-
-                reward_batch = np.array([
-                    reward_dict[f'agent_{i}'] for i in range(self.num_agents)
-                ])
-                episode_reward += reward_batch.mean()
-
-                done = terminated_dict['__all__'] or truncated_dict['__all__']
-
-            eval_rewards.append(episode_reward)
-
-        return np.mean(eval_rewards)
-
-    def save_training_curves(self):
-        """保存训练曲线数据"""
-        import matplotlib.pyplot as plt
-
-        # 绘制奖励曲线
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.episode_rewards, alpha=0.6, label='Episode Reward')
-
-        # 移动平均
-        window = 50
-        if len(self.episode_rewards) >= window:
-            moving_avg = np.convolve(
-                self.episode_rewards,
-                np.ones(window)/window,
-                mode='valid'
-            )
-            plt.plot(
-                range(window-1, len(self.episode_rewards)),
-                moving_avg,
-                'r-',
-                linewidth=2,
-                label=f'Moving Average ({window})'
-            )
-
-        plt.xlabel('Episode')
-        plt.ylabel('Reward')
-        plt.title('Training Curve - MAPPO on Horizontal Layout Port')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-
-        curve_path = os.path.join(train_config.LOG_DIR, 'training_curve.png')
-        plt.savefig(curve_path, dpi=300, bbox_inches='tight')
-        print(f"Training curve saved to {curve_path}")
-
-        # 保存数据 - 修复JSON序列化问题
-        def make_serializable(obj):
-            """将配置对象转换为可序列化的字典"""
-            if hasattr(obj, '__dict__'):
-                return {
-                    k: v for k, v in obj.__dict__.items()
-                    if not k.startswith('_') and not callable(v)
-                }
-            return obj
-
-        data = {
+    def save_checkpoint(self, episode, final=False):
+        """保存检查点"""
+        checkpoint = {
+            'episode': episode,
+            'actor_critic_state_dict': self.actor_critic.state_dict(),
+            'optimizer_state_dict': self.mappo.optimizer.state_dict(),
             'episode_rewards': self.episode_rewards,
-            'config': {
-                'env_config': make_serializable(env_config),
-                'train_config': make_serializable(train_config),
-                'model_config': make_serializable(model_config)
-            }
+            'episode_lengths': self.episode_lengths,
+            'tasks_completed': self.tasks_completed,
         }
 
-        json_path = os.path.join(train_config.LOG_DIR, 'training_data.json')
-        with open(json_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        print(f"Training data saved to {json_path}")
+        if final:
+            save_path = os.path.join(
+                self.config['checkpoint_dir'],
+                f'mappo_final_{self.mode}.pt'
+            )
+            print(f"\n💾 Saving final model to: {save_path}")
+        else:
+            save_path = os.path.join(
+                self.config['checkpoint_dir'],
+                f'mappo_episode_{episode}.pt'
+            )
+            print(f"💾 Checkpoint saved: Episode {episode}")
+
+        torch.save(checkpoint, save_path)
+
+    def load_checkpoint(self, path):
+        """加载检查点"""
+        print(f"📂 Loading checkpoint from: {path}")
+        checkpoint = torch.load(path, map_location=self.device)
+
+        self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
+        self.mappo.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.start_episode = checkpoint['episode']
+        self.episode_rewards = checkpoint['episode_rewards']
+        self.episode_lengths = checkpoint['episode_lengths']
+        self.tasks_completed = checkpoint['tasks_completed']
+
+        print(f"✅ Resumed from episode {self.start_episode}")
 
 
 def main():
     """主函数"""
-    trainer = Trainer()
+    parser = argparse.ArgumentParser(description='AGV MAPPO Training')
+
+    parser.add_argument('--mode', type=str, default='standard',
+                       choices=['quick', 'medium', 'standard'],
+                       help='Training mode: quick(100), medium(1000), standard(5000)')
+
+    parser.add_argument('--episodes', type=int, default=None,
+                       help='Custom number of episodes (overrides mode)')
+
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Path to checkpoint to resume training')
+
+    args = parser.parse_args()
+
+    # 创建训练器
+    trainer = Trainer(
+        mode=args.mode,
+        custom_episodes=args.episodes,
+        resume_path=args.resume
+    )
+
+    # 开始训练
     trainer.train()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

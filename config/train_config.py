@@ -8,7 +8,7 @@ class TrainConfig:
     """训练配置类"""
 
     # ===== 基础训练参数 =====
-    NUM_EPISODES = 550  # 训练总轮数
+    NUM_EPISODES = 5000  # 训练总轮数
     MAX_STEPS_PER_EPISODE = 2000  # 每轮最大步数
 
     BATCH_SIZE = 256  # 批次大小

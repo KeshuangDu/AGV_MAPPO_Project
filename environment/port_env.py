@@ -2,6 +2,9 @@
 港口环境主类
 实现水平布局的多AGV港口仿真环境
 支持双向路由和多智能体交互
+
+更新日期：2025.10.17
+更新内容：放宽终止条件，避免过早结束训练
 """
 
 import numpy as np
@@ -12,6 +15,10 @@ import copy
 
 from .agv import AGV
 from .equipment import QuayCrane, YardCrane, Task
+
+# 新增导入
+from .task_manager import TaskManager, TaskManagerFactory
+from .reward_shaper import RewardShaper, RewardShaperFactory
 
 
 class PortEnvironment(gym.Env):
@@ -70,6 +77,27 @@ class PortEnvironment(gym.Env):
         # 渲染相关
         self.render_mode = None
         self.screen = None
+
+        # ========== 初始化任务管理器和奖励塑形器 ==========
+        if config.USE_TASK_MANAGER:
+            self.task_manager = TaskManagerFactory.create(
+                'basic',  # 使用基础任务管理器
+                config
+            )
+            self.reward_shaper = RewardShaperFactory.create(
+                config.REWARD_TYPE,
+                config
+            )
+            if config.VERBOSE:
+                print(f"[PortEnv] Task Manager enabled: "
+                      f"strategy={config.TASK_ASSIGNMENT_STRATEGY}")
+                print(f"[PortEnv] Reward Shaper enabled: "
+                      f"type={config.REWARD_TYPE}")
+        else:
+            self.task_manager = None
+            self.reward_shaper = None
+            if config.VERBOSE:
+                print("[PortEnv] Using original task/reward logic")
 
     def _init_equipment(self):
         """初始化港口设备"""
@@ -207,6 +235,10 @@ class PortEnvironment(gym.Env):
             'avg_task_time': 0.0
         }
 
+        # 重置任务管理器
+        if self.task_manager:
+            self.task_manager.reset()
+
         # 获取初始观察
         observations = self._get_observations()
         info = self._get_info()
@@ -240,18 +272,47 @@ class PortEnvironment(gym.Env):
         for yc in self.ycs:
             yc.update(self.dt)
 
+        # ========== 使用任务管理器 ==========
+        completed_this_step = []
+
+        if self.task_manager:
+            # 任务分配
+            self.task_manager.assign_tasks(self.agvs, self.tasks)
+
+            # 任务状态更新和完成检测
+            completed_this_step = self.task_manager.update_task_status(
+                self.agvs,
+                self.tasks
+            )
+
+            # 移动已完成任务到completed_tasks
+            for task in completed_this_step:
+                if task in self.tasks:
+                    self.tasks.remove(task)
+                self.completed_tasks.append(task)
+                self.episode_stats['tasks_completed'] += 1
+
         # 3. 检查碰撞
         collisions = self._check_collisions()
 
-        # 4. 更新任务状态
-        self._update_tasks()
+        # 4. 更新任务状态（如果不使用任务管理器）
+        if not self.task_manager:
+            self._update_tasks()
 
         # 5. 生成新任务
         if np.random.random() < self.task_gen_rate:
             self._generate_tasks(num_tasks=1)
 
-        # 6. 计算奖励
-        rewards = self._compute_rewards(collisions)
+        # ========== 使用奖励塑形器 ==========
+        if self.reward_shaper:
+            rewards = self.reward_shaper.compute_rewards(
+                self.agvs,
+                collisions,
+                completed_this_step
+            )
+        else:
+            # 使用原有奖励计算方法
+            rewards = self._compute_rewards(collisions)
 
         # 7. 更新时间和步数
         self.current_time += self.dt
@@ -276,44 +337,64 @@ class PortEnvironment(gym.Env):
 
         return observations, rewards, terminateds, truncateds, infos
 
+    # ========== 以下方法保持不变 ==========
+
     def _execute_action(self, agv: AGV, action: Dict):
         """
         执行AGV动作
 
         Args:
-            agv: AGV对象
+            agv: AGV实体
             action: 动作字典
         """
-        # 解析动作
+        import torch
+
+        # 处理lane（离散动作）
         lane = action['lane']
+        if isinstance(lane, torch.Tensor):
+            lane = lane.item()  # 转换为Python标量
+        agv.current_lane = int(lane)
+
+        # 处理direction（离散动作）
         direction = action['direction']
-        motion = action['motion']
+        if isinstance(direction, torch.Tensor):
+            direction = direction.item()
 
-        # 更新车道
-        agv.current_lane = lane
-
-        # 更新方向 (双向路由关键)
-        target_forward = (direction == 0)
+        target_forward = (int(direction) == 0)
         if agv.moving_forward != target_forward:
             agv.switch_direction()
 
-        # 更新运动状态
-        acceleration = motion[0] * agv.max_accel
-        steering = motion[1] * np.pi / 6  # 最大±30度
+        # 处理motion（连续动作）- 关键修复 ✨
+        motion = action['motion']
 
+        # 将torch.Tensor转换为numpy数组
+        if isinstance(motion, torch.Tensor):
+            motion = motion.detach().cpu().numpy()
+
+        # 确保motion是一维数组
+        if motion.ndim > 1:
+            motion = motion.squeeze()
+
+        # 确保motion有2个元素
+        if motion.shape[0] != 2:
+            raise ValueError(
+                f"motion应该有2个元素[加速度, 转向角]，"
+                f"但实际有{motion.shape[0]}个元素。motion shape: {motion.shape}"
+            )
+
+        # 提取加速度和转向角
+        acceleration = float(motion[0]) * agv.max_accel
+        steering = float(motion[1]) * np.pi / 6
+
+        # 更新AGV状态
         agv.update_state(acceleration, steering, self.dt)
 
-        # 边界约束
+        # 限制AGV位置在港口范围内
         agv.position[0] = np.clip(agv.position[0], 0, self.width)
         agv.position[1] = np.clip(agv.position[1], 0, self.height)
 
     def _check_collisions(self) -> List[Tuple[int, int]]:
-        """
-        检查AGV之间的碰撞
-
-        Returns:
-            碰撞的AGV对 [(i, j), ...]
-        """
+        """检查AGV之间的碰撞"""
         collisions = []
         safe_dist = self.config.SAFE_DISTANCE
 
@@ -328,27 +409,17 @@ class PortEnvironment(gym.Env):
         return collisions
 
     def _generate_tasks(self, num_tasks: int = 1):
-        """
-        生成新任务
-
-        Args:
-            num_tasks: 生成任务数量
-        """
+        """生成新任务"""
         for _ in range(num_tasks):
             if len(self.tasks) >= self.max_tasks:
                 break
 
-            # 随机选择任务类型
             task_type = np.random.choice(self.config.TASK_TYPES)
-
-            # 随机选择QC和YC
             qc_id = np.random.randint(0, self.num_qcs)
             yc_id = np.random.randint(0, self.num_ycs)
 
-            # 创建任务
             task = Task(task_type, qc_id, yc_id)
 
-            # 设置pickup和delivery位置
             if task_type == 'import':
                 task.pickup_location = self.qcs[qc_id].position.copy()
                 task.delivery_location = self.ycs[yc_id].position.copy()
@@ -359,7 +430,7 @@ class PortEnvironment(gym.Env):
             self.tasks.append(task)
 
     def _update_tasks(self):
-        """更新任务状态"""
+        """更新任务状态（原有方法，保留以兼容）"""
         for task in self.tasks[:]:
             if task.status == 'completed':
                 self.completed_tasks.append(task)
@@ -367,39 +438,27 @@ class PortEnvironment(gym.Env):
                 self.episode_stats['tasks_completed'] += 1
 
     def _compute_rewards(self, collisions: List) -> Dict:
-        """
-        计算奖励
-
-        Args:
-            collisions: 碰撞列表
-
-        Returns:
-            奖励字典
-        """
+        """计算奖励（原有方法，保留以兼容）"""
         rewards = {}
         w = self.reward_weights
 
         for i, agv in enumerate(self.agvs):
             reward = 0.0
 
-            # 时间惩罚
             reward += w['time_penalty']
 
-            # 碰撞惩罚
             if agv.collision_flag:
                 reward += w['collision']
                 agv.collision_flag = False
 
-            # 任务完成奖励
-            if agv.current_task and agv.current_task['status'] == 'completed':
+            if agv.current_task and agv.current_task.get('status') == 'completed':
                 reward += w['task_completion']
 
-            # 双向路由奖励(如果有效利用双向)
             if hasattr(agv, 'direction_changes'):
                 if agv.direction_changes > 0 and agv.direction_changes < 3:
-                    reward += w['bidirectional_bonus']
+                    reward += w.get('bidirectional_bonus', 0)
                 elif agv.direction_changes >= 3:
-                    reward += w['direction_change']
+                    reward += w.get('direction_change', 0)
 
             rewards[f'agent_{i}'] = reward
             self.episode_stats['total_reward'] += reward
@@ -407,13 +466,17 @@ class PortEnvironment(gym.Env):
         return rewards
 
     def _check_done(self) -> bool:
-        """检查是否结束"""
+        """
+        检查是否结束
+        
+        ✨ 修改：放宽终止条件，避免过早结束
+        """
         # 所有任务完成
         if len(self.tasks) == 0 and len(self.completed_tasks) > 0:
             return True
 
-        # 发生严重碰撞
-        if self.episode_stats['collisions'] > 10:
+        # 碰撞次数过多（从30增加到100（改进版 v2））✨ 重要修改
+        if self.episode_stats['collisions'] > 100:
             return True
 
         return False
@@ -429,16 +492,7 @@ class PortEnvironment(gym.Env):
         return observations
 
     def _get_single_observation(self, agv: AGV) -> Dict:
-        """
-        获取单个AGV的观察
-
-        Args:
-            agv: AGV对象
-
-        Returns:
-            观察字典
-        """
-        # 自身状态 [x, y, vx, vy, direction, has_container, moving_forward]
+        """获取单个AGV的观察"""
         own_state = np.array([
             agv.position[0] / self.width,
             agv.position[1] / self.height,
@@ -449,13 +503,8 @@ class PortEnvironment(gym.Env):
             float(agv.moving_forward)
         ], dtype=np.float32)
 
-        # 附近AGV状态
         nearby_agvs = self._get_nearby_agvs(agv, max_count=5)
-
-        # 任务信息
         task_info = self._get_task_info(agv)
-
-        # 路径占用信息
         path_occupancy = self._get_path_occupancy()
 
         return {
@@ -491,7 +540,7 @@ class PortEnvironment(gym.Env):
 
         if agv.current_task:
             task = agv.current_task
-            task_info[0] = 1.0  # 有任务
+            task_info[0] = 1.0
             task_info[1] = task['pickup_location'][0] / self.width
             task_info[2] = task['pickup_location'][1] / self.height
             task_info[3] = task['delivery_location'][0] / self.width
@@ -509,7 +558,6 @@ class PortEnvironment(gym.Env):
             if 0 <= lane < len(occupancy):
                 occupancy[lane] += 1.0
 
-        # 归一化
         occupancy = np.clip(occupancy / self.num_agvs, 0, 1)
 
         return occupancy
@@ -528,7 +576,6 @@ class PortEnvironment(gym.Env):
     def render(self):
         """渲染环境(可选实现)"""
         if self.render_mode == 'human':
-            # 可以用pygame实现可视化
             pass
 
     def close(self):
