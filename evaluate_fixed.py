@@ -1,6 +1,8 @@
 """
 评估程序
 评估训练好的MAPPO模型性能
+
+✨ 修复：确保使用和训练时相同的环境配置
 """
 
 import os
@@ -14,7 +16,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config.env_config import env_config
+from config.env_config import env_config  # ✨ 使用修改后的配置
 from config.train_config import train_config
 from config.model_config import model_config
 from environment.port_env import PortEnvironment
@@ -38,12 +40,20 @@ class Evaluator:
         )
         print(f"Using device: {self.device}")
 
+        # ✨ 打印当前使用的配置
+        print("\n当前配置：")
+        print(f"  - 任务管理器: {env_config.USE_TASK_MANAGER}")
+        print(f"  - 奖励类型: {env_config.REWARD_TYPE}")
+        print(f"  - 任务完成奖励: {env_config.REWARD_WEIGHTS['task_completion']}")
+        print(f"  - 碰撞惩罚: {env_config.REWARD_WEIGHTS['collision']}")
+        print(f"  - 详细输出: {env_config.VERBOSE}")
+
         # 初始化环境
         self.env = PortEnvironment(env_config)
         self.num_agents = env_config.NUM_AGVS
 
         # 计算观察维度
-        self.obs_dim = 7 + 5*4 + 6 + env_config.NUM_HORIZONTAL_LANES
+        self.obs_dim = 7 + 5 * 4 + 6 + env_config.NUM_HORIZONTAL_LANES
 
         # 初始化模型
         self.actor_critic = ActorCritic(
@@ -63,8 +73,13 @@ class Evaluator:
         )
 
         # 加载模型
-        self.mappo.load(checkpoint_path)
-        print(f"Model loaded from {checkpoint_path}")
+        if os.path.exists(checkpoint_path):
+            self.mappo.load(checkpoint_path)
+            print(f"✅ Model loaded from {checkpoint_path}")
+        else:
+            print(f"❌ Error: Checkpoint not found at {checkpoint_path}")
+            print("请检查路径是否正确")
+            sys.exit(1)
 
         # 评估结果
         self.eval_results = {
@@ -85,12 +100,13 @@ class Evaluator:
         obs_list.append(obs_dict['path_occupancy'])
         return np.concatenate(obs_list, axis=0)
 
-    def evaluate_episode(self, render: bool = False) -> dict:
+    def evaluate_episode(self, render: bool = False, verbose: bool = False) -> dict:
         """
         评估单个episode
 
         Args:
             render: 是否渲染
+            verbose: 是否打印详细信息
 
         Returns:
             episode统计信息
@@ -103,6 +119,12 @@ class Evaluator:
         # 记录AGV方向变化
         direction_changes = [0] * self.num_agents
         prev_directions = [agv.moving_forward for agv in self.env.agvs]
+
+        # ✨ 记录任务完成情况
+        initial_tasks = len(self.env.tasks)
+
+        if verbose:
+            print(f"\n初始任务数: {initial_tasks}")
 
         while not done:
             # 收集观察
@@ -150,31 +172,43 @@ class Evaluator:
         # 收集统计信息
         info = info_dict.get('agent_0', {})
 
+        completed_tasks = info.get('completed_tasks', 0)
+
+        if verbose:
+            print(f"最终完成任务数: {completed_tasks}")
+            print(f"Episode奖励: {episode_reward:.2f}")
+            print(f"Episode长度: {episode_length}")
+            print(f"碰撞次数: {info.get('collisions', 0)}")
+
         return {
             'reward': episode_reward,
             'length': episode_length,
-            'tasks_completed': info.get('completed_tasks', 0),
+            'tasks_completed': completed_tasks,
             'collisions': info.get('collisions', 0),
             'direction_changes': np.mean(direction_changes)
         }
 
-    def evaluate(self, num_episodes: int = 100, render: bool = False):
+    def evaluate(self, num_episodes: int = 100, render: bool = False, verbose: bool = False):
         """
         运行完整评估
 
         Args:
             num_episodes: 评估轮数
             render: 是否渲染
+            verbose: 是否打印详细信息
         """
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("Starting Evaluation")
-        print("="*50)
+        print("=" * 50)
         print(f"Number of Episodes: {num_episodes}")
         print(f"Number of AGVs: {self.num_agents}")
-        print("="*50 + "\n")
+        print("=" * 50 + "\n")
 
         for episode in tqdm(range(num_episodes), desc="Evaluating"):
-            result = self.evaluate_episode(render=render)
+            # 前3个episode打印详细信息用于调试
+            verbose_this_episode = verbose or (episode < 3)
+
+            result = self.evaluate_episode(render=render, verbose=verbose_this_episode)
 
             self.eval_results['episode_rewards'].append(result['reward'])
             self.eval_results['episode_lengths'].append(result['length'])
@@ -193,9 +227,9 @@ class Evaluator:
 
     def print_statistics(self):
         """打印统计信息"""
-        print("\n" + "="*50)
+        print("\n" + "=" * 50)
         print("Evaluation Results")
-        print("="*50)
+        print("=" * 50)
 
         for key, values in self.eval_results.items():
             if values:
@@ -210,7 +244,26 @@ class Evaluator:
                 print(f"  Min:  {min_val:.2f}")
                 print(f"  Max:  {max_val:.2f}")
 
-        print("\n" + "="*50)
+        # ✨ 特别强调任务完成情况
+        tasks_completed = self.eval_results['tasks_completed']
+        if tasks_completed:
+            total_tasks = sum(tasks_completed)
+            print(f"\n⭐ 关键指标 ⭐")
+            print(f"  总完成任务数: {total_tasks}")
+            print(f"  平均每轮完成: {np.mean(tasks_completed):.2f}")
+
+            if total_tasks == 0:
+                print(f"\n⚠️  警告：没有完成任何任务！")
+                print(f"  这说明模型还没有学会任务完成策略")
+                print(f"  建议：")
+                print(f"    1. 检查配置是否一致")
+                print(f"    2. 继续训练更多轮次")
+                print(f"    3. 考虑使用课程学习")
+            else:
+                completion_rate = (total_tasks / (len(tasks_completed) * 5)) * 100
+                print(f"  完成率: {completion_rate:.1f}%")
+
+        print("\n" + "=" * 50)
 
     def visualize_results(self):
         """可视化评估结果"""
@@ -290,7 +343,7 @@ class Evaluator:
         # 保存图像
         save_path = os.path.join(train_config.LOG_DIR, 'evaluation_results.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"\nVisualization saved to {save_path}")
+        print(f"\n✅ Visualization saved to {save_path}")
 
         plt.show()
 
@@ -313,7 +366,9 @@ class Evaluator:
             'config': {
                 'num_agents': self.num_agents,
                 'bidirectional': env_config.BIDIRECTIONAL,
-                'num_lanes': env_config.NUM_HORIZONTAL_LANES
+                'num_lanes': env_config.NUM_HORIZONTAL_LANES,
+                'use_task_manager': env_config.USE_TASK_MANAGER,
+                'reward_type': env_config.REWARD_TYPE
             }
         }
 
@@ -321,7 +376,7 @@ class Evaluator:
         with open(save_path, 'w') as f:
             json.dump(results, f, indent=2)
 
-        print(f"Results saved to {save_path}")
+        print(f"✅ Results saved to {save_path}")
 
 
 def main():
@@ -332,7 +387,7 @@ def main():
     parser.add_argument(
         '--checkpoint',
         type=str,
-        default='./data/checkpoints/500mappo_final.pt',
+        default='./data/checkpoints_quick/mappo_final_100ep.pt',
         help='Path to model checkpoint'
     )
     parser.add_argument(
@@ -346,18 +401,28 @@ def main():
         action='store_true',
         help='Render environment'
     )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Print detailed information'
+    )
 
     args = parser.parse_args()
 
     # 检查检查点是否存在
     if not os.path.exists(args.checkpoint):
-        print(f"Error: Checkpoint not found at {args.checkpoint}")
-        print("Please train the model first using train.py")
+        print(f"❌ Error: Checkpoint not found at {args.checkpoint}")
+        print("\n可用的检查点：")
+        checkpoint_dir = os.path.dirname(args.checkpoint)
+        if os.path.exists(checkpoint_dir):
+            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
+            for cp in checkpoints:
+                print(f"  - {os.path.join(checkpoint_dir, cp)}")
         return
 
     # 运行评估
     evaluator = Evaluator(args.checkpoint)
-    evaluator.evaluate(num_episodes=args.episodes, render=args.render)
+    evaluator.evaluate(num_episodes=args.episodes, render=args.render, verbose=args.verbose)
 
 
 if __name__ == "__main__":

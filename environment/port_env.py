@@ -340,56 +340,22 @@ class PortEnvironment(gym.Env):
     # ========== 以下方法保持不变 ==========
 
     def _execute_action(self, agv: AGV, action: Dict):
-        """
-        执行AGV动作
-
-        Args:
-            agv: AGV实体
-            action: 动作字典
-        """
-        import torch
-
-        # 处理lane（离散动作）
+        """执行AGV动作"""
         lane = action['lane']
-        if isinstance(lane, torch.Tensor):
-            lane = lane.item()  # 转换为Python标量
-        agv.current_lane = int(lane)
-
-        # 处理direction（离散动作）
         direction = action['direction']
-        if isinstance(direction, torch.Tensor):
-            direction = direction.item()
+        motion = action['motion']
 
-        target_forward = (int(direction) == 0)
+        agv.current_lane = lane
+
+        target_forward = (direction == 0)
         if agv.moving_forward != target_forward:
             agv.switch_direction()
 
-        # 处理motion（连续动作）- 关键修复 ✨
-        motion = action['motion']
+        acceleration = motion[0] * agv.max_accel
+        steering = motion[1] * np.pi / 6
 
-        # 将torch.Tensor转换为numpy数组
-        if isinstance(motion, torch.Tensor):
-            motion = motion.detach().cpu().numpy()
-
-        # 确保motion是一维数组
-        if motion.ndim > 1:
-            motion = motion.squeeze()
-
-        # 确保motion有2个元素
-        if motion.shape[0] != 2:
-            raise ValueError(
-                f"motion应该有2个元素[加速度, 转向角]，"
-                f"但实际有{motion.shape[0]}个元素。motion shape: {motion.shape}"
-            )
-
-        # 提取加速度和转向角
-        acceleration = float(motion[0]) * agv.max_accel
-        steering = float(motion[1]) * np.pi / 6
-
-        # 更新AGV状态
         agv.update_state(acceleration, steering, self.dt)
 
-        # 限制AGV位置在港口范围内
         agv.position[0] = np.clip(agv.position[0], 0, self.width)
         agv.position[1] = np.clip(agv.position[1], 0, self.height)
 

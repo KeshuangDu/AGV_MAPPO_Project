@@ -1,6 +1,8 @@
 """
 训练主程序
 执行MAPPO训练循环
+
+✨ 修改：使用快速训练配置（100轮测试）
 """
 
 import os
@@ -17,7 +19,7 @@ import pickle
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config.env_config import env_config
-from config.train_config import train_config
+from config.train_config_quick import train_config  # ✨ 改为快速训练配置
 from config.model_config import model_config
 from environment.port_env import PortEnvironment
 from models.actor_critic import ActorCritic
@@ -81,6 +83,7 @@ class Trainer:
             log_dir = os.path.join(train_config.TB_LOG_DIR, f"run_{timestamp}")
             self.writer = SummaryWriter(log_dir)
             print(f"TensorBoard logs will be saved to: {log_dir}")
+            print(f"启动TensorBoard: tensorboard --logdir={train_config.TB_LOG_DIR}")
         else:
             self.writer = None
 
@@ -261,12 +264,14 @@ class Trainer:
     def train(self):
         """主训练循环"""
         print("\n" + "="*50)
-        print("Starting MAPPO Training")
+        print("Starting MAPPO Training - Quick Test (100 Episodes)")
         print("="*50)
-        print(f"Environment: Water Horizontal Layout Port")
+        print(f"Environment: Horizontal Layout Port")
         print(f"Number of AGVs: {self.num_agents}")
         print(f"Bidirectional Routing: Enabled")
         print(f"Total Episodes: {train_config.NUM_EPISODES}")
+        print(f"Max Steps per Episode: {train_config.MAX_STEPS_PER_EPISODE}")
+        print(f"Reward Type: {env_config.REWARD_TYPE}")
         print("="*50 + "\n")
 
         for episode in tqdm(range(train_config.NUM_EPISODES), desc="Training"):
@@ -330,7 +335,7 @@ class Trainer:
         # 保存最终模型
         final_model_path = os.path.join(
             train_config.CHECKPOINT_DIR,
-            "500mappo_final.pt"
+            "mappo_final_100ep.pt"
         )
         self.mappo.save(final_model_path)
 
@@ -415,7 +420,7 @@ class Trainer:
         plt.plot(self.episode_rewards, alpha=0.6, label='Episode Reward')
 
         # 移动平均
-        window = 50
+        window = min(20, len(self.episode_rewards) // 2)  # 快速训练用小窗口
         if len(self.episode_rewards) >= window:
             moving_avg = np.convolve(
                 self.episode_rewards,
@@ -432,15 +437,16 @@ class Trainer:
 
         plt.xlabel('Episode')
         plt.ylabel('Reward')
-        plt.title('Training Curve - MAPPO on Horizontal Layout Port')
+        plt.title('Training Curve - MAPPO Quick Test (100 Episodes)')
         plt.legend()
         plt.grid(True, alpha=0.3)
 
         curve_path = os.path.join(train_config.LOG_DIR, 'training_curve.png')
         plt.savefig(curve_path, dpi=300, bbox_inches='tight')
         print(f"Training curve saved to {curve_path}")
+        plt.close()
 
-        # 保存数据 - 修复JSON序列化问题
+        # 保存数据
         def make_serializable(obj):
             """将配置对象转换为可序列化的字典"""
             if hasattr(obj, '__dict__'):
