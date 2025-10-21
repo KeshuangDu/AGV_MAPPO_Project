@@ -1,12 +1,12 @@
 """
-奖励塑形器模块 - 改进版 v2
-基于调试评估结果优化
+奖励塑形器模块 - v2.1版本
+基于调试评估结果优化 + 添加单向/双向模式支持
 
-更新日期：2025.10.17
+更新日期：2025.10.20
 更新内容：
-1. 增加加速奖励
-2. 增强接近目标奖励
-3. 减小负奖励影响
+1. 保留v2的所有改进（加速奖励、接近奖励等）
+2. 新增单向模式下的后退惩罚
+3. 双向路由奖励仅在双向模式下生效
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from typing import List, Dict, Tuple
 
 
 class RewardShaper:
-    """奖励塑形器 - 改进版"""
+    """奖励塑形器 - v2.1版"""
 
     def __init__(self, config):
         """初始化奖励塑形器"""
@@ -22,6 +22,9 @@ class RewardShaper:
         self.weights = config.REWARD_WEIGHTS
         self.reward_type = config.REWARD_TYPE
         self.verbose = config.VERBOSE
+
+        # ✨ 新增：记录模式信息
+        self.bidirectional = config.BIDIRECTIONAL
 
     def compute_rewards(
             self,
@@ -64,6 +67,12 @@ class RewardShaper:
                 reward += w['collision']
                 agv.collision_flag = False
 
+            # ✨ 单向模式：后退惩罚
+            if not self.bidirectional and hasattr(agv, '_attempted_backward'):
+                if agv._attempted_backward:
+                    reward += -5.0
+                    agv._attempted_backward = False
+
             # 任务完成大奖励
             if agv.current_task and agv.current_task.get('status') == 'completed':
                 reward += w['task_completion']
@@ -83,12 +92,16 @@ class RewardShaper:
             completed_tasks: List
     ) -> Dict[str, float]:
         """
-        密集奖励模式 - 改进版 v2 ✨✨
-        
-        基于调试发现的改进：
+        密集奖励模式 - v2.1版本
+
+        v2改进保留：
         1. 增加加速奖励（解决总是减速的问题）
         2. 增强接近目标奖励（AGV已能到31米，需要更强引导）
         3. 新增25米内奖励（填补50米和15米之间的空白）
+
+        ✨ v2.1新增：
+        4. 单向模式下的后退惩罚
+        5. 双向奖励仅在双向模式下生效
         """
         rewards = {}
         w = self.weights
@@ -111,7 +124,7 @@ class RewardShaper:
                     target = task['delivery_location']
                     phase = 'delivery'
 
-                # 2.1 距离变化奖励（引导AGV朝目标移动）✨
+                # 2.1 距离变化奖励（引导AGV朝目标移动）
                 current_dist = np.linalg.norm(agv.position - target)
 
                 # 初始化上一步距离
@@ -128,13 +141,13 @@ class RewardShaper:
                 # 更新距离记录
                 agv.prev_dist_to_target = current_dist
 
-                # 2.2 接近目标的阶段性奖励（增强版）✨✨
+                # 2.2 接近目标的阶段性奖励（v2增强版）
                 if current_dist < 50.0 and 'approach_bonus_50' in w:
                     if not hasattr(agv, '_approach_50_rewarded'):
                         reward += w['approach_bonus_50']
                         agv._approach_50_rewarded = True
 
-                # ✨✨ 新增：25米内奖励（填补空白）
+                # v2新增：25米内奖励
                 if current_dist < 25.0 and 'reaching_near_target' in w:
                     if not hasattr(agv, '_approach_25_rewarded'):
                         reward += w['reaching_near_target']
@@ -148,7 +161,7 @@ class RewardShaper:
                         reward += w['approach_bonus_30']
                         agv._approach_30_rewarded = True
 
-                # ✨✨ 增强：15米内大奖励
+                # v2增强：15米内大奖励
                 if current_dist < 15.0 and 'approach_bonus_15' in w:
                     if not hasattr(agv, '_approach_15_rewarded'):
                         reward += w['approach_bonus_15']
@@ -164,14 +177,10 @@ class RewardShaper:
                         agv._pickup_rewarded = True
 
                         # 重置接近奖励标记（为delivery阶段准备）
-                        if hasattr(agv, '_approach_50_rewarded'):
-                            delattr(agv, '_approach_50_rewarded')
-                        if hasattr(agv, '_approach_25_rewarded'):
-                            delattr(agv, '_approach_25_rewarded')
-                        if hasattr(agv, '_approach_30_rewarded'):
-                            delattr(agv, '_approach_30_rewarded')
-                        if hasattr(agv, '_approach_15_rewarded'):
-                            delattr(agv, '_approach_15_rewarded')
+                        for attr in ['_approach_50_rewarded', '_approach_25_rewarded',
+                                     '_approach_30_rewarded', '_approach_15_rewarded']:
+                            if hasattr(agv, attr):
+                                delattr(agv, attr)
 
                         if self.verbose:
                             print(f"[RewardShaper] AGV{i} pickup成功！ "
@@ -192,32 +201,45 @@ class RewardShaper:
                         print(f"[RewardShaper] AGV{i} 完成任务！ "
                               f"+{w['task_completion']}")
 
-            # === 3. 安全相关惩罚（减小影响）✨ ===
+            # === 3. 安全相关惩罚（v2减小影响）===
             if agv.collision_flag:
-                reward += w['collision']  # 已减小到-10
+                reward += w['collision']  # v2: -20 → -10
                 agv.collision_flag = False
 
-            # === 4. 双向路由相关 ===
-            if hasattr(agv, '_last_direction'):
-                if agv.moving_forward != agv._last_direction:
-                    if 'direction_change' in w:
-                        reward += w['direction_change']
-            agv._last_direction = agv.moving_forward
+            # === 4. ✨✨ v2.1新增：单向模式下的后退惩罚 ===
+            if not self.bidirectional:
+                # 单向模式：惩罚尝试后退的行为
+                if hasattr(agv, '_attempted_backward'):
+                    if agv._attempted_backward:
+                        reward += -5.0  # 尝试后退的惩罚
+                        agv._attempted_backward = False
 
-            # === 5. ✨✨ 新增：加速奖励（解决总是减速的问题）===
+                        if self.verbose:
+                            print(f"[RewardShaper] AGV{i} 在单向模式下尝试后退，"
+                                  f"惩罚-5.0")
+
+            # === 5. 双向路由相关（✨仅在双向模式下生效）===
+            if self.bidirectional:
+                if hasattr(agv, '_last_direction'):
+                    if agv.moving_forward != agv._last_direction:
+                        if 'direction_change' in w:
+                            reward += w['direction_change']
+                agv._last_direction = agv.moving_forward
+
+            # === 6. v2新增：加速奖励（解决总是减速的问题）===
             if hasattr(agv, 'velocity') and agv.velocity > 0:
                 # 如果AGV在移动（速度>0），给予小奖励
                 if 'acceleration_bonus' in w:
                     reward += w['acceleration_bonus']
-            
+
             # 记录速度用于下次检查
             if not hasattr(agv, '_prev_velocity'):
                 agv._prev_velocity = 0
-            
+
             # 如果速度增加（加速），额外奖励
             if agv.velocity > agv._prev_velocity and 'acceleration_bonus' in w:
                 reward += w['acceleration_bonus'] * 0.5
-            
+
             agv._prev_velocity = agv.velocity
 
             rewards[f'agent_{i}'] = reward
@@ -239,9 +261,12 @@ class RewardShaperFactory:
 
 
 if __name__ == "__main__":
-    print("RewardShaper模块已加载 - 改进版 v2")
-    print("\n改进内容：")
+    print("RewardShaper模块已加载 - v2.1版本")
+    print("\nv2改进保留：")
     print("  1. ✅ 新增25米内奖励（填补50米和15米之间的空白）")
     print("  2. ✅ 增强15米内奖励（从5.0增加到15.0）")
     print("  3. ✅ 新增加速奖励（鼓励AGV积极移动）")
     print("  4. ✅ 减小碰撞惩罚（从-20减小到-10）")
+    print("\nv2.1新增：")
+    print("  5. ✅ 单向模式下的后退惩罚（-5.0）")
+    print("  6. ✅ 双向奖励仅在双向模式下生效")

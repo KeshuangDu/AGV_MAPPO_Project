@@ -1,6 +1,8 @@
 """
 AGV实体类
 定义AGV的状态、行为和属性
+
+✨ v2.1更新：添加单向/双向模式支持
 """
 
 import numpy as np
@@ -45,6 +47,9 @@ class AGV:
 
         # 双向运动状态
         self.moving_forward = True  # True: 前进, False: 后退
+
+        # ✨ 新增：记录是否尝试后退（用于单向模式奖励）
+        self._attempted_backward = False
 
         # 任务状态
         self.current_task = None
@@ -120,7 +125,15 @@ class AGV:
             self.target_position = None
 
     def switch_direction(self):
-        """切换运动方向(双向路由关键)"""
+        """
+        切换运动方向(双向路由关键)
+
+        ✨ 新增：标记后退尝试（用于单向模式检测）
+        """
+        # 如果尝试从前进切换到后退，标记这个尝试
+        if self.moving_forward:
+            self._attempted_backward = True
+
         self.moving_forward = not self.moving_forward
         self.velocity = -self.velocity
 
@@ -217,6 +230,9 @@ class AGV:
         self.trajectory_history = []
         self.collision_flag = False
         self.target_position = None
+
+        # ✨ 重置后退尝试标记
+        self._attempted_backward = False
 
     def __repr__(self):
         return f"AGV_{self.id}(pos={self.position}, vel={self.velocity:.2f}, " \

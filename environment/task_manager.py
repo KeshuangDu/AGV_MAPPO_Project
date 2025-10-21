@@ -1,10 +1,10 @@
 """
-任务管理器模块
+任务管理器模块 - v2.2版本
 负责任务分配、状态更新、完成检测
-支持多种分配策略，便于消融实验
+✨ 新增：任务完成时间追踪
 
-作者：AGV_MAPPO_Project
-日期：2025.10.17
+更新日期：2025.10.20
+更新内容：添加任务开始时间和完成时间记录
 """
 
 import numpy as np
@@ -15,12 +15,13 @@ from .equipment import Task
 
 class TaskManager:
     """
-    任务管理器基类
+    任务管理器基类 - v2.2
 
     功能：
     1. 任务分配：根据不同策略分配任务给AGV
     2. 状态更新：检测AGV是否到达pickup/delivery点
     3. 完成检测：判定任务完成并返回已完成任务列表
+    4. ✨ 时间追踪：记录任务开始和完成时间
     """
 
     def __init__(self, config):
@@ -60,82 +61,53 @@ class TaskManager:
             self._assign_sequential(agvs, tasks)
 
     def _assign_nearest(self, agvs: List[AGV], tasks: List[Task]) -> None:
-        """
-        最近距离分配策略
-        为每个空闲AGV分配距离最近的任务
-
-        适用场景：传统调度算法对比baseline
-        """
+        """最近距离分配策略"""
         for agv in agvs:
             if agv.current_task is None:
-                # 筛选待分配任务
                 available_tasks = [t for t in tasks if t.status == 'pending']
                 if not available_tasks:
                     continue
 
-                # 计算到每个任务pickup点的距离
                 distances = [
                     np.linalg.norm(agv.position - t.pickup_location)
                     for t in available_tasks
                 ]
 
-                # 选择最近的任务
                 nearest_idx = np.argmin(distances)
                 nearest_task = available_tasks[nearest_idx]
 
                 self._assign_single_task(agv, nearest_task)
 
     def _assign_sequential(self, agvs: List[AGV], tasks: List[Task]) -> None:
-        """
-        顺序分配策略（简单baseline）
-        按任务列表顺序依次分配给空闲AGV
-
-        适用场景：RL训练初期，简单baseline
-        """
+        """顺序分配策略"""
         for agv in agvs:
             if agv.current_task is None:
-                # 筛选待分配任务
                 available_tasks = [t for t in tasks if t.status == 'pending']
                 if not available_tasks:
                     continue
 
-                # 选择第一个任务
                 task = available_tasks[0]
                 self._assign_single_task(agv, task)
 
     def _assign_random(self, agvs: List[AGV], tasks: List[Task]) -> None:
-        """
-        随机分配策略
-        随机选择任务分配给空闲AGV
-
-        适用场景：消融实验，测试随机策略作为baseline
-        """
+        """随机分配策略"""
         for agv in agvs:
             if agv.current_task is None:
-                # 筛选待分配任务
                 available_tasks = [t for t in tasks if t.status == 'pending']
                 if not available_tasks:
                     continue
 
-                # 随机选择
                 task = np.random.choice(available_tasks)
                 self._assign_single_task(agv, task)
 
     def _assign_priority(self, agvs: List[AGV], tasks: List[Task]) -> None:
-        """
-        优先级分配策略
-        优先分配高优先级任务
-
-        适用场景：考虑任务紧急度的调度
-        """
+        """优先级分配策略"""
         for agv in agvs:
             if agv.current_task is None:
-                # 筛选待分配任务
                 available_tasks = [t for t in tasks if t.status == 'pending']
                 if not available_tasks:
                     continue
 
-                # 按优先级排序，选择最高优先级
                 sorted_tasks = sorted(
                     available_tasks,
                     key=lambda t: t.priority,
@@ -145,14 +117,21 @@ class TaskManager:
 
                 self._assign_single_task(agv, task)
 
-    def _assign_single_task(self, agv: AGV, task: Task) -> None:
+    def _assign_single_task(self, agv: AGV, task: Task, current_time: float = None) -> None:
         """
         将单个任务分配给指定AGV
+
+        ✨ v2.2：记录任务开始时间
 
         Args:
             agv: 目标AGV
             task: 待分配任务
+            current_time: 当前时间（秒）
         """
+        # ✨ 记录任务开始时间
+        if current_time is not None:
+            task.start_time = current_time
+
         # 构建任务字典
         task_dict = {
             'id': task.id,
@@ -160,7 +139,8 @@ class TaskManager:
             'pickup_location': task.pickup_location.copy(),
             'delivery_location': task.delivery_location.copy(),
             'status': 'assigned',
-            'priority': task.priority
+            'priority': task.priority,
+            'start_time': task.start_time  # ✨ 添加开始时间
         }
 
         # 分配给AGV
@@ -174,20 +154,25 @@ class TaskManager:
         self.total_assigned += 1
 
         if self.verbose:
+            time_str = f" at t={current_time:.1f}s" if current_time is not None else ""
             print(f"[TaskManager] Assigned task {task.id} "
-                  f"({task.type}) to AGV{agv.id}")
+                  f"({task.type}) to AGV{agv.id}{time_str}")
 
     def update_task_status(
             self,
             agvs: List[AGV],
-            tasks: List[Task]
+            tasks: List[Task],
+            current_time: float = None  # ✨ 新增参数：当前时间
     ) -> List[Task]:
         """
         更新任务状态，检测pickup和delivery完成
 
+        ✨ v2.2：记录任务完成时间
+
         Args:
             agvs: AGV列表
             tasks: 当前任务列表
+            current_time: 当前时间（秒）
 
         Returns:
             completed_tasks: 本轮完成的任务列表
@@ -224,12 +209,19 @@ class TaskManager:
 
                 # 到达delivery点，完成任务！
                 if dist_to_delivery < self.arrival_threshold:
-                    # 标记任务完成
-                    agv.current_task['status'] = 'completed'
-
                     # 在任务列表中找到对应的Task对象
                     for t in tasks:
                         if t.id == task_dict['id']:
+                            # ✨ 记录任务完成时间
+                            if current_time is not None:
+                                t.end_time = current_time
+
+                                # ✨ 计算任务完成用时
+                                if t.start_time is not None:
+                                    t.completion_time = t.end_time - t.start_time
+                                else:
+                                    t.completion_time = None
+
                             t.complete()
                             completed_tasks.append(t)
 
@@ -237,10 +229,16 @@ class TaskManager:
                             self.total_completed += 1
 
                             if self.verbose:
+                                time_info = ""
+                                if hasattr(t, 'completion_time') and t.completion_time is not None:
+                                    time_info = f" in {t.completion_time:.1f}s"
+
                                 print(f"[TaskManager] ★ AGV{agv.id} "
-                                      f"COMPLETED task {t.id} "
-                                      f"at {task_dict['delivery_location']}!")
+                                      f"COMPLETED task {t.id}{time_info}!")
                             break
+
+                    # 标记任务完成
+                    agv.current_task['status'] = 'completed'
 
                     # 清空AGV的当前任务
                     agv.complete_task()
@@ -270,47 +268,22 @@ class TaskManager:
 
 
 class TaskManagerFactory:
-    """
-    任务管理器工厂类
-    便于扩展不同类型的任务管理器
-    """
+    """任务管理器工厂类"""
 
     @staticmethod
     def create(strategy: str, config) -> TaskManager:
-        """
-        根据策略创建任务管理器
-
-        Args:
-            strategy: 任务管理策略类型
-                - 'basic': 基础任务管理器
-                - 'rl': RL控制的任务管理器（未来扩展）
-                - 'hybrid': 混合策略（未来扩展）
-            config: 环境配置
-
-        Returns:
-            TaskManager实例
-        """
+        """根据策略创建任务管理器"""
         if strategy == 'basic':
             return TaskManager(config)
         elif strategy == 'rl':
-            # 未来可以实现：由RL智能体决定任务分配
-            # return RLTaskManager(config)
             return TaskManager(config)
         elif strategy == 'hybrid':
-            # 未来可以实现：结合启发式规则和RL
-            # return HybridTaskManager(config)
             return TaskManager(config)
         else:
-            # 默认返回基础版本
             return TaskManager(config)
 
 
 # ===== 使用示例 =====
 if __name__ == "__main__":
-    # 这是一个使用示例（实际使用时不需要运行此部分）
-    print("TaskManager模块已加载")
-    print("支持的分配策略：")
-    print("  - 'sequential': 顺序分配")
-    print("  - 'nearest': 最近距离分配")
-    print("  - 'random': 随机分配")
-    print("  - 'priority': 优先级分配")
+    print("TaskManager模块已加载 - v2.2版本")
+    print("✨ 新增功能：任务完成时间追踪")

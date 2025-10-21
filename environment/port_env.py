@@ -99,8 +99,33 @@ class PortEnvironment(gym.Env):
             if config.VERBOSE:
                 print("[PortEnv] Using original task/reward logic")
 
+    """
+    port_env.py 中需要修改的部分（修正版）
+    在原有文件中找到 _init_equipment() 方法，替换为以下代码
+    """
+
     def _init_equipment(self):
-        """初始化港口设备"""
+        """
+        初始化设备（AGV、QC、YC）
+        支持水平和垂直两种布局
+        """
+        # 检查布局类型
+        layout_type = getattr(self.config, 'LAYOUT_TYPE', 'horizontal')
+
+        if layout_type == 'horizontal':
+            self._init_horizontal_layout()
+        elif layout_type == 'vertical':
+            self._init_vertical_layout()
+        else:
+            raise ValueError(f"Unknown layout type: {layout_type}")
+
+    def _init_horizontal_layout(self):
+        """
+        水平布局初始化（原有逻辑）
+        - QC在左边（x=0附近）
+        - YC在右边（x=640附近）
+        - AGV在水平通道上移动
+        """
         # 初始化AGV
         self.agvs = []
         for i in range(self.num_agvs):
@@ -140,6 +165,93 @@ class PortEnvironment(gym.Env):
                 operation_time_range=self.config.YC_OPERATION_TIME
             )
             self.ycs.append(yc)
+
+        print(f"✅ 水平布局初始化完成:")
+        print(f"   - QC数量: {len(self.qcs)} (左边)")
+        print(f"   - YC数量: {len(self.ycs)} (右边)")
+        print(f"   - AGV数量: {len(self.agvs)}")
+        print(f"   - 水平通道数: {self.config.NUM_HORIZONTAL_LANES}")
+
+    def _init_vertical_layout(self):
+        """
+        垂直布局初始化（新增）
+        - QC在下边（y=0附近）
+        - YC在上边（y=320附近）
+        - AGV在垂直通道上移动
+        """
+        # 初始化AGV - 均匀分布在中间区域
+        self.agvs = []
+        for i in range(self.num_agvs):
+            # AGV初始位置均匀分布在中间区域
+            init_x = np.random.uniform(100, self.width - 100)
+            init_y = np.random.uniform(100, self.height - 100)
+            init_pos = (init_x, init_y)
+
+            agv = AGV(
+                agv_id=i,
+                init_position=init_pos,
+                max_speed=self.config.AGV_MAX_SPEED,
+                max_accel=self.config.AGV_MAX_ACCEL,
+                length=self.config.AGV_LENGTH,
+                width=self.config.AGV_WIDTH
+            )
+            self.agvs.append(agv)
+
+        # 初始化岸桥(QC) - 位于底部
+        # QC沿X轴均匀分布，Y坐标固定在底部
+        self.qcs = []
+        qc_x_positions = np.linspace(
+            self.width * 0.2,
+            self.width * 0.8,
+            self.num_qcs
+        )
+
+        for i in range(self.num_qcs):
+            pos = (qc_x_positions[i], 50.0)  # Y坐标固定在底部
+            qc = QuayCrane(
+                crane_id=i,
+                position=pos,
+                operation_time_range=self.config.QC_OPERATION_TIME
+            )
+            self.qcs.append(qc)
+
+        # 初始化场桥(YC) - 位于顶部
+        # YC沿X轴均匀分布，Y坐标固定在顶部
+        self.ycs = []
+        yc_x_positions = np.linspace(
+            self.width * 0.2,
+            self.width * 0.8,
+            self.num_ycs
+        )
+
+        for i in range(self.num_ycs):
+            pos = (yc_x_positions[i], self.height - 50.0)  # Y坐标固定在顶部
+            yc = YardCrane(
+                crane_id=i,
+                position=pos,
+                operation_time_range=self.config.YC_OPERATION_TIME
+            )
+            self.ycs.append(yc)
+
+        print(f"✅ 垂直布局初始化完成:")
+        print(f"   - QC数量: {len(self.qcs)} (底部)")
+        print(f"   - YC数量: {len(self.ycs)} (顶部)")
+        print(f"   - AGV数量: {len(self.agvs)}")
+        print(f"   - 垂直通道数: {self.config.NUM_HORIZONTAL_LANES}")
+
+    """
+    使用说明：
+    1. 在 port_env.py 中找到原有的 _init_equipment() 方法
+    2. 替换为上面的新版本（包含布局类型判断）
+    3. 添加 _init_horizontal_layout() 方法（将原有的初始化逻辑移入）
+    4. 添加 _init_vertical_layout() 方法（新的垂直布局逻辑）
+
+    关键修正：
+    - ✅ 使用正确的参数名 crane_id（不是 qc_id）
+    - ✅ 移除了不存在的 zone 参数
+    - ✅ 使用与原代码相同的 AGV 初始化方式
+    - ✅ 保持与原代码相同的参数顺序
+    """
 
     def _setup_spaces(self):
         """设置动作空间和观察空间"""
@@ -282,7 +394,8 @@ class PortEnvironment(gym.Env):
             # 任务状态更新和完成检测
             completed_this_step = self.task_manager.update_task_status(
                 self.agvs,
-                self.tasks
+                self.tasks,
+                self.current_time
             )
 
             # 移动已完成任务到completed_tasks
@@ -337,25 +450,54 @@ class PortEnvironment(gym.Env):
 
         return observations, rewards, terminateds, truncateds, infos
 
-    # ========== 以下方法保持不变 ==========
 
     def _execute_action(self, agv: AGV, action: Dict):
-        """执行AGV动作"""
+        """
+        执行AGV动作
+
+        ✨ v2.1更新：添加BIDIRECTIONAL参数控制
+        - BIDIRECTIONAL=True: 允许前进和后退
+        - BIDIRECTIONAL=False: 强制只能前进
+        """
         lane = action['lane']
         direction = action['direction']
         motion = action['motion']
 
         agv.current_lane = lane
 
-        target_forward = (direction == 0)
-        if agv.moving_forward != target_forward:
-            agv.switch_direction()
+        # ========== ✨ 核心修改：双向路由控制 ==========
+        if self.config.BIDIRECTIONAL:
+            # 双向模式：允许前进/后退切换
+            target_forward = (direction == 0)
+            if agv.moving_forward != target_forward:
+                agv.switch_direction()
 
+                if self.config.VERBOSE:
+                    mode = "前进" if target_forward else "后退"
+                    print(f"[PortEnv] AGV{agv.id} 切换方向 -> {mode}")
+        else:
+            # 单向模式：强制只能前进
+            if not agv.moving_forward:
+                # 如果当前是后退状态，强制切换为前进
+                agv.moving_forward = True
+                agv.velocity = abs(agv.velocity)  # 速度取绝对值
+
+                if self.config.VERBOSE:
+                    print(f"[PortEnv] AGV{agv.id} 单向模式，强制前进")
+
+            # 如果网络尝试输出后退动作（direction=1），标记这个尝试
+            if direction == 1:
+                agv._attempted_backward = True
+                if self.config.VERBOSE:
+                    print(f"[PortEnv] AGV{agv.id} 尝试后退但被阻止（单向模式）")
+
+        # ========== 以下保持不变 ==========
         acceleration = motion[0] * agv.max_accel
         steering = motion[1] * np.pi / 6
 
         agv.update_state(acceleration, steering, self.dt)
 
+        # 边界限制
         agv.position[0] = np.clip(agv.position[0], 0, self.width)
         agv.position[1] = np.clip(agv.position[1], 0, self.height)
 

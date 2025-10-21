@@ -21,6 +21,9 @@ class EnvConfig:
     NUM_HORIZONTAL_LANES = 3  # 水平通道数量
     LANE_WIDTH = 8.0  # 车道宽度(米)
 
+    # ========== 🆕 新增：布局类型配置 ==========
+    LAYOUT_TYPE = 'horizontal'  # 布局类型：'horizontal' 或 'vertical'
+
     # QC和YC位置
     NUM_QC = 3  # 岸桥数量
     NUM_YC = 3  # 场桥数量
