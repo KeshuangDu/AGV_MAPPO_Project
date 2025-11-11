@@ -15,7 +15,7 @@ class TrainConfig:
     EXPERIMENT_DESC = "水平布局 + 单向路由（对比实验）"
 
     # ===== 基础训练参数 =====
-    NUM_EPISODES = 1000  # 训练1000轮（与双向保持一致）
+    NUM_EPISODES = 5000  # 训练1000轮（与双向保持一致）
     MAX_STEPS_PER_EPISODE = 1000  # 每轮最大1000步
 
     BATCH_SIZE = 256  # 批次大小

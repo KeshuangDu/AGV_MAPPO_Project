@@ -15,7 +15,7 @@ class TrainConfig:
     EXPERIMENT_DESC = "水平布局 + 双向路由（baseline）"
 
     # ===== 基础训练参数 =====
-    NUM_EPISODES = 1000  # 训练1000轮
+    NUM_EPISODES = 5000  # 训练1000轮
     MAX_STEPS_PER_EPISODE = 1000  # 每轮最大1000步
 
     BATCH_SIZE = 256  # 批次大小

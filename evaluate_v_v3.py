@@ -286,7 +286,7 @@ class EvaluatorV2:
 
         # ✨ 调整为2x4布局（8个图）
         fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-        fig.suptitle(f'Evaluation Results - Horizontal_{mode_name} ({self.experiment_name}) v2.2',
+        fig.suptitle(f'Evaluation Results - Vertical_{mode_name} v2.2',
                      fontsize=16, fontweight='bold')
 
         # 前6个图保持不变...
